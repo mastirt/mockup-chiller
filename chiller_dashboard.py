@@ -265,15 +265,17 @@ _, p_total     = gen_time_series(base=315, noise=28, trend=-5)
 _, p_pred      = gen_time_series(base=power_est, noise=8, trend=-3)
 
 rooms = {
-    "Filling Room A": {"ahu":"AHU-1","load_pct":88,"temp":22.1,"status":"active","kw":84},
-    "Filling Room B": {"ahu":"AHU-1","load_pct":72,"temp":22.4,"status":"active","kw":68},
-    "Granulasi":      {"ahu":"AHU-2","load_pct":95,"temp":21.8,"status":"critical","kw":102},
-    "Coating":        {"ahu":"AHU-2","load_pct":60,"temp":22.9,"status":"standby","kw":58},
-    "QC Lab":         {"ahu":"AHU-3","load_pct":45,"temp":23.1,"status":"active","kw":41},
-    "Blending":       {"ahu":"MAU",  "load_pct":30,"temp":23.5,"status":"idle","kw":24},
-    "Packaging":      {"ahu":"MAU",  "load_pct":55,"temp":22.8,"status":"active","kw":49},
-    "Warehouse":      {"ahu":"AHU-3","load_pct":20,"temp":24.2,"status":"idle","kw":16},
+    "Filling Room A": {"ahu":"AHU-1","load_pct":88,"temp":22.1,"rh":58,"status":"active","kw":84},
+    "Filling Room B": {"ahu":"AHU-1","load_pct":72,"temp":22.4,"rh":63,"status":"active","kw":68},
+    "Granulasi":      {"ahu":"AHU-2","load_pct":95,"temp":21.8,"rh":71,"status":"critical","kw":102},
+    "Coating":        {"ahu":"AHU-2","load_pct":60,"temp":22.9,"rh":65,"status":"standby","kw":58},
+    "QC Lab":         {"ahu":"AHU-3","load_pct":45,"temp":23.1,"rh":60,"status":"active","kw":41},
+    "Blending":       {"ahu":"MAU",  "load_pct":30,"temp":23.5,"rh":68,"status":"idle","kw":24},
+    "Packaging":      {"ahu":"MAU",  "load_pct":55,"temp":22.8,"rh":74,"status":"active","kw":49},
+    "Warehouse":      {"ahu":"AHU-3","load_pct":20,"temp":26.2,"rh":72,"status":"idle","kw":16},
 }
+TEMP_LIMIT = 25.0
+RH_LIMIT   = 70
 
 badge_map = {"active":"badge-active","standby":"badge-standby","idle":"badge-idle","critical":"badge-critical"}
 badge_label = {"active":"Produksi","standby":"Standby","idle":"Idle","critical":"High Load"}
@@ -387,24 +389,60 @@ with tab2:
     for idx, (room, info) in enumerate(rooms.items()):
         col = cols[idx % 4]
         with col:
-            badge_cls   = badge_map[info["status"]]
-            badge_lbl   = badge_label[info["status"]]
-            bar_color   = {"active":ACCENT_BLUE,"standby":ACCENT_GREEN,
-                           "idle":"#4a6a8a","critical":ACCENT_RED}[info["status"]]
-            load_pct    = info["load_pct"]
+            badge_cls  = badge_map[info["status"]]
+            badge_lbl  = badge_label[info["status"]]
+            bar_color  = {"active":ACCENT_BLUE,"standby":ACCENT_GREEN,
+                          "idle":"#4a6a8a","critical":ACCENT_RED}[info["status"]]
+            temp       = info["temp"]
+            rh         = info["rh"]
+            kw         = info["kw"]
+            ahu        = info["ahu"]
+
+            # Bar widths (capped at 100%)
+            temp_pct   = min(temp / TEMP_LIMIT * 100, 100)
+            rh_pct     = min(rh   / RH_LIMIT   * 100, 100)
+
+            # Exceed limit → red, else colour by status
+            temp_color = ACCENT_RED if temp > TEMP_LIMIT else ACCENT_BLUE
+            rh_color   = ACCENT_RED if rh   > RH_LIMIT   else ACCENT_CYAN
+
+            temp_warn  = " ⚠" if temp > TEMP_LIMIT else ""
+            rh_warn    = " ⚠" if rh   > RH_LIMIT   else ""
+
+            # Limit marker position (always at 100% of bar width = the limit line)
             st.markdown(f"""
             <div class="metric-card" style="--accent:{bar_color}; margin-bottom:12px;">
-              <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px;">
+              <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
                 <div style="font-size:13px; font-weight:500; color:#c8d8e8; line-height:1.3;">{room}</div>
                 <span class="room-badge {badge_cls}">{badge_lbl}</span>
               </div>
-              <div style="font-size:11px; color:#4a6a8a; margin-bottom:6px;">{info['ahu']} · {info['temp']}°C</div>
-              <div style="background:#0f1923; border-radius:4px; height:6px; margin-bottom:8px;">
-                <div style="background:{bar_color}; width:{load_pct}%; height:100%; border-radius:4px;"></div>
+              <div style="font-size:10px; color:#4a6a8a; margin-bottom:10px;">{ahu} &nbsp;·&nbsp; <span style="font-family:'DM Mono',monospace;">{kw} kW</span></div>
+
+              <!-- Suhu bar -->
+              <div style="margin-bottom:8px;">
+                <div style="display:flex; justify-content:space-between; font-size:10px; margin-bottom:3px;">
+                  <span style="color:#6a8aaa;">🌡 Suhu</span>
+                  <span style="font-family:'DM Mono',monospace; color:{temp_color};">{temp}°C{temp_warn}</span>
+                </div>
+                <div style="position:relative; background:#0f1923; border-radius:4px; height:7px;">
+                  <div style="background:{temp_color}; width:{temp_pct:.1f}%; height:100%; border-radius:4px; transition:width 0.4s;"></div>
+                  <!-- limit marker at 100% = 25°C -->
+                  <div style="position:absolute; top:-2px; right:0; width:2px; height:11px; background:#fbbf24; border-radius:1px;"></div>
+                </div>
+                <div style="font-size:9px; color:#3a5a7a; text-align:right; margin-top:1px;">batas 25°C</div>
               </div>
-              <div style="display:flex; justify-content:space-between; font-size:11px; color:#6a8aaa;">
-                <span>Load: {load_pct}%</span>
-                <span style="font-family:'DM Mono',monospace; color:#c8d8e8;">{info['kw']} kW</span>
+
+              <!-- RH bar -->
+              <div>
+                <div style="display:flex; justify-content:space-between; font-size:10px; margin-bottom:3px;">
+                  <span style="color:#6a8aaa;">💧 RH</span>
+                  <span style="font-family:'DM Mono',monospace; color:{rh_color};">{rh}%{rh_warn}</span>
+                </div>
+                <div style="position:relative; background:#0f1923; border-radius:4px; height:7px;">
+                  <div style="background:{rh_color}; width:{rh_pct:.1f}%; height:100%; border-radius:4px; transition:width 0.4s;"></div>
+                  <div style="position:absolute; top:-2px; right:0; width:2px; height:11px; background:#fbbf24; border-radius:1px;"></div>
+                </div>
+                <div style="font-size:9px; color:#3a5a7a; text-align:right; margin-top:1px;">batas 70%</div>
               </div>
             </div>""", unsafe_allow_html=True)
 
