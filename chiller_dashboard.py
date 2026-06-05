@@ -179,10 +179,10 @@ PLOT_LAYOUT = dict(
     paper_bgcolor="rgba(0,0,0,0)",
     plot_bgcolor="rgba(0,0,0,0)",
     font=dict(family="DM Sans", color="#8aa8c8", size=11),
-    xaxis=dict(gridcolor="#1e2d3d", zeroline=False, tickfont=dict(size=10)),
-    yaxis=dict(gridcolor="#1e2d3d", zeroline=False, tickfont=dict(size=10)),
     hovermode="x unified",
 )
+# Default axis styling — pass explicitly per chart to avoid duplicate-kwarg errors
+_AX = dict(gridcolor="#1e2d3d", zeroline=False, tickfont=dict(size=10))
 _L = dict(bgcolor="rgba(0,0,0,0)", font=dict(size=10), orientation="h",
           yanchor="bottom", y=1.01, xanchor="left", x=0)
 # Default margin applied separately so individual charts can override without conflict
@@ -195,17 +195,25 @@ ACCENT_AMBER   = "#fbbf24"
 ACCENT_RED     = "#f87171"
 ACCENT_PURPLE  = "#a78bfa"
 
-def metric_card(label, value, unit, delta=None, accent=ACCENT_BLUE):
+def metric_card(label, value, unit, delta=None, accent=ACCENT_BLUE,
+                sublabel=None, subvalue=None, subunit="", badge=None, badge_color=None):
     delta_html = ""
-    if delta:
+    if delta is not None:
         cls = "delta-up" if delta > 0 else "delta-down"
         arrow = "▲" if delta > 0 else "▼"
         delta_html = f'<div class="metric-delta {cls}">{arrow} {abs(delta):.1f}% vs kemarin</div>'
+    sub_html = ""
+    if sublabel and subvalue is not None:
+        sub_html = f'<div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e2d3d;font-size:10px;color:#4a6a8a;">{sublabel}<span style="font-family:DM Mono,monospace;color:#c8d8e8;margin-left:6px;">{subvalue}<span style="font-size:9px;color:#4a6a8a;margin-left:2px;">{subunit}</span></span></div>'
+    badge_html = ""
+    if badge:
+        bc = badge_color or accent
+        badge_html = f'<div style="margin-top:8px;display:inline-block;padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;background:{bc}22;color:{bc};border:1px solid {bc}55;">{badge}</div>'
     st.markdown(f"""
     <div class="metric-card" style="--accent:{accent}">
       <div class="metric-label">{label}</div>
       <div class="metric-value">{value}<span class="metric-unit">{unit}</span></div>
-      {delta_html}
+      {delta_html}{badge_html}{sub_html}
     </div>""", unsafe_allow_html=True)
 
 def gen_time_series(hours=24, base=100, noise=15, trend=0):
@@ -252,11 +260,45 @@ with st.sidebar:
     ])
 
 # ── Derived values ────────────────────────────────────────────────────────────
-delta_T  = outside_temp - sp_chiller
-ahu_avg  = (sp_ahu1 + sp_ahu2 + sp_ahu3 + sp_mau) / 4
-load_est = 320 + delta_T * 8 + (24 - ahu_avg) * 12 + outside_rh * 0.8
-cop_est  = round(max(2.8, 5.2 - delta_T * 0.12), 2)
+delta_T   = outside_temp - sp_chiller
+ahu_avg   = (sp_ahu1 + sp_ahu2 + sp_ahu3 + sp_mau) / 4
+load_est  = 320 + delta_T * 8 + (24 - ahu_avg) * 12 + outside_rh * 0.8
+cop_est   = round(max(2.8, 5.2 - delta_T * 0.12), 2)
 power_est = round(load_est / cop_est, 1)
+
+# ── Extended KPI calculations ─────────────────────────────────────────────────
+# Avg kWh/day: assume 20-hr operational, vary with load
+op_hours       = 20
+kwh_per_day    = round(power_est * op_hours, 0)          # kWh/day
+kwh_per_month  = round(kwh_per_day * 26 / 1000, 1)       # MWh/month (26 working days)
+
+# RLA (Rated Load Ampere) estimation
+# Chiller rated ~800A FLA at full load; RLA = FLA * load_factor
+chiller_fla    = 800  # A per chiller
+load_factor    = min(power_est / 400, 1.0)               # 400 kW = full load 1 chiller
+rla_per_chiller = round(chiller_fla * load_factor, 0)
+avg_rla_pct    = round(load_factor * 100, 1)
+
+# Evaporator Leaving Water Temperature (ELT)
+# ELT ≈ setpoint chiller + small approach (0.5-1.5°C depending on load)
+approach_temp  = 0.5 + load_factor * 1.0
+elt            = round(sp_chiller + approach_temp, 1)
+
+# Chiller recommendation: 1 chiller up to ~380 kW, 2 chillers above
+if power_est <= 380:
+    chiller_rec     = "1 Chiller"
+    chiller_rec_color = ACCENT_GREEN
+    chiller_rec_icon  = "❄️"
+else:
+    chiller_rec     = "2 Chiller"
+    chiller_rec_color = ACCENT_AMBER
+    chiller_rec_icon  = "❄️❄️"
+
+# Load factor for 2-chiller scenario
+if power_est > 380:
+    load_factor_each = min(power_est / 800, 1.0)
+    rla_per_chiller  = round(chiller_fla * load_factor_each, 0)
+    avg_rla_pct      = round(load_factor_each * 100, 1)
 
 np.random.seed(42)
 t, p_chiller5 = gen_time_series(base=160, noise=18, trend=-10)
@@ -299,12 +341,35 @@ st.markdown("---")
 #  KPI CARDS
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown('<div class="section-header">Ringkasan Prediksi</div>', unsafe_allow_html=True)
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1: metric_card("Prediksi Konsumsi", f"{power_est:.0f}", "kW",   delta=2.3,  accent=ACCENT_BLUE)
-with c2: metric_card("COP Chiller",       f"{cop_est}",       "",      delta=-0.8, accent=ACCENT_CYAN)
-with c3: metric_card("Total Cooling Load",f"{load_est:.0f}",  "kW",   delta=4.1,  accent=ACCENT_AMBER)
-with c4: metric_card("Suhu Luar",         f"{outside_temp}", "°C",   accent=ACCENT_RED)
-with c5: metric_card("Setpoint Chiller",  f"{sp_chiller}",   "°C",   accent=ACCENT_GREEN)
+
+# Row 1 – 6 cards
+r1c1, r1c2, r1c3, r1c4, r1c5, r1c6 = st.columns(6)
+with r1c1:
+    metric_card("Rata-rata Konsumsi", f"{kwh_per_day:,.0f}", "kWh/hari",
+                delta=2.3, accent=ACCENT_BLUE,
+                sublabel="Bulan ini", subvalue=f"{kwh_per_month}", subunit="MWh")
+with r1c2:
+    metric_card("COP Chiller", f"{cop_est}", "",
+                delta=-0.8, accent=ACCENT_CYAN,
+                sublabel="Kondisi", subvalue="Optimal" if cop_est >= 3.5 else "Perlu cek",
+                subunit="")
+with r1c3:
+    metric_card("Rekomendasi", chiller_rec_icon, "",
+                accent=chiller_rec_color,
+                badge=chiller_rec, badge_color=chiller_rec_color,
+                sublabel="Est. beban", subvalue=f"{power_est:.0f}", subunit="kW")
+with r1c4:
+    metric_card("Prediksi RLA", f"{avg_rla_pct}", "%",
+                accent=ACCENT_AMBER,
+                sublabel="Per chiller", subvalue=f"{rla_per_chiller:.0f}", subunit="A")
+with r1c5:
+    metric_card("ELT Evaporator", f"{elt}", "°C",
+                accent=ACCENT_PURPLE,
+                sublabel="Setpoint", subvalue=f"{sp_chiller}", subunit="°C")
+with r1c6:
+    metric_card("Total Cooling Load", f"{load_est:.0f}", "kW",
+                delta=4.1, accent=ACCENT_RED,
+                sublabel="Suhu luar", subvalue=f"{outside_temp}", subunit="°C")
 
 st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
 
@@ -337,7 +402,7 @@ with tab1:
             mode="lines", line=dict(color=ACCENT_AMBER, width=2, dash="dash"),
         ))
         fig_power.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=260,
-            yaxis_title="kW", xaxis_title="Waktu")
+            xaxis={**_AX}, yaxis={**_AX, "title":"kW"}, xaxis_title="Waktu")
         st.markdown('<div class="chart-card"><div class="chart-title">Power Usage – Chiller 5 & 6</div><div class="chart-subtitle">Konsumsi aktual vs prediksi (kW)</div>', unsafe_allow_html=True)
         st.plotly_chart(fig_power, use_container_width=True, config={"displayModeBar":False})
         st.markdown("</div>", unsafe_allow_html=True)
@@ -376,10 +441,134 @@ with tab1:
         fillcolor="rgba(52,211,153,0.10)"
     ))
     fig_energy.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=180,
-        yaxis_title="kWh", xaxis_title="Waktu")
+        xaxis={**_AX}, yaxis={**_AX, "title":"kWh"}, xaxis_title="Waktu")
     st.markdown('<div class="chart-card"><div class="chart-title">Energi Kumulatif</div><div class="chart-subtitle">Total akumulasi energi hari ini (kWh)</div>', unsafe_allow_html=True)
     st.plotly_chart(fig_energy, use_container_width=True, config={"displayModeBar":False})
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Tren RLA, ELT, ELP, Total Konsumsi ──────────────────────────────────
+    st.markdown('<div class="section-header" style="margin-top:8px;">Tren Prediksi – RLA · ELT · ELP · Total Konsumsi</div>', unsafe_allow_html=True)
+
+    # Generate time-series for each parameter
+    np.random.seed(7)
+    # RLA % – follows load pattern, moderate noise
+    _, p_rla_raw = gen_time_series(base=avg_rla_pct, noise=4, trend=-2)
+    p_rla = np.clip(p_rla_raw, 40, 105)
+
+    # ELT – Evaporator Leaving Temperature (°C)
+    # Inversely related to load: heavier load → slightly higher ELT
+    elt_base = sp_chiller + 0.5 + load_factor * 1.0
+    _, p_elt_raw = gen_time_series(base=elt_base, noise=0.4, trend=0.2)
+    p_elt = np.clip(p_elt_raw, sp_chiller - 0.5, sp_chiller + 3.0)
+
+    # ELP – Evaporator Leaving Pressure (kPa)
+    # Saturation pressure at ELT for R-134a approx: P(kPa) = 101.3 * exp(0.065 * (T - 5))
+    p_elp = np.array([round(101.3 * np.exp(0.065 * (t_val - 5)), 1) for t_val in p_elt])
+    p_elp += np.random.normal(0, 1.2, len(p_elp))
+    p_elp = np.clip(p_elp, 85, 145)
+
+    # Total konsumsi (kW) – sum of both chillers
+    p_total_kw = p_chiller5 + p_chiller6
+
+    # ── 2-column layout for 4 charts ──
+    col_t1, col_t2 = st.columns(2, gap="medium")
+
+    with col_t1:
+        # Chart A – RLA Trend
+        rla_limit = 100
+        fig_rla = go.Figure()
+        fig_rla.add_trace(go.Scatter(
+            x=t, y=p_rla, name="RLA Chiller 5",
+            mode="lines", line=dict(color=ACCENT_AMBER, width=1.8),
+            fill="tozeroy", fillcolor="rgba(251,191,36,0.08)"
+        ))
+        # RLA limit line
+        fig_rla.add_hline(y=rla_limit, line_color=ACCENT_RED, line_dash="dot", line_width=1.5,
+            annotation_text="Batas RLA 100%", annotation_font_color=ACCENT_RED,
+            annotation_font_size=10, annotation_position="top right")
+        # Warning zone fill
+        fig_rla.add_hrect(y0=90, y1=105, fillcolor="rgba(248,113,113,0.05)",
+            line_width=0, annotation_text="⚠ Warning zone",
+            annotation_font_size=9, annotation_font_color="#f87171")
+        fig_rla.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=210,
+            xaxis={**_AX, "title":"Waktu"},
+            yaxis={**_AX, "title":"RLA (%)", "range":[40, 110]})
+        st.markdown('<div class="chart-card"><div class="chart-title">Tren RLA Chiller</div><div class="chart-subtitle">Prediksi % Rated Load Ampere · batas 100%</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_rla, use_container_width=True, config={"displayModeBar":False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Chart C – ELP Trend
+        elp_low_limit  = 90.0   # kPa
+        elp_high_limit = 130.0  # kPa
+        fig_elp = go.Figure()
+        fig_elp.add_trace(go.Scatter(
+            x=t, y=p_elp, name="ELP",
+            mode="lines", line=dict(color=ACCENT_CYAN, width=1.8),
+            fill="tozeroy", fillcolor="rgba(34,211,238,0.07)"
+        ))
+        fig_elp.add_hline(y=elp_high_limit, line_color=ACCENT_RED, line_dash="dot", line_width=1.5,
+            annotation_text=f"Batas atas {elp_high_limit} kPa",
+            annotation_font_color=ACCENT_RED, annotation_font_size=10,
+            annotation_position="top right")
+        fig_elp.add_hline(y=elp_low_limit, line_color=ACCENT_AMBER, line_dash="dot", line_width=1.5,
+            annotation_text=f"Batas bawah {elp_low_limit} kPa",
+            annotation_font_color=ACCENT_AMBER, annotation_font_size=10,
+            annotation_position="bottom right")
+        fig_elp.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=210,
+            xaxis={**_AX, "title":"Waktu"},
+            yaxis={**_AX, "title":"Tekanan (kPa)", "range":[75, 150]})
+        st.markdown('<div class="chart-card"><div class="chart-title">Tren Evaporator Leaving Pressure (ELP)</div><div class="chart-subtitle">Prediksi tekanan refrigeran keluar evaporator (kPa) · R-134a</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_elp, use_container_width=True, config={"displayModeBar":False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_t2:
+        # Chart B – ELT Trend
+        elt_limit = sp_chiller + 2.5
+        fig_elt = go.Figure()
+        fig_elt.add_trace(go.Scatter(
+            x=t, y=p_elt, name="ELT",
+            mode="lines", line=dict(color=ACCENT_PURPLE, width=1.8),
+            fill="tozeroy", fillcolor="rgba(167,139,250,0.08)"
+        ))
+        fig_elt.add_hline(y=elt_limit, line_color=ACCENT_RED, line_dash="dot", line_width=1.5,
+            annotation_text=f"Batas ELT {elt_limit:.1f}°C",
+            annotation_font_color=ACCENT_RED, annotation_font_size=10,
+            annotation_position="top right")
+        fig_elt.add_hline(y=sp_chiller, line_color=ACCENT_GREEN, line_dash="dot", line_width=1,
+            annotation_text=f"Setpoint {sp_chiller}°C",
+            annotation_font_color=ACCENT_GREEN, annotation_font_size=10,
+            annotation_position="bottom right")
+        fig_elt.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=210,
+            xaxis={**_AX, "title":"Waktu"},
+            yaxis={**_AX, "title":"Suhu (°C)", "range":[sp_chiller - 1, sp_chiller + 4]})
+        st.markdown('<div class="chart-card"><div class="chart-title">Tren Evaporator Leaving Temperature (ELT)</div><div class="chart-subtitle">Prediksi suhu air keluar evaporator (°C)</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_elt, use_container_width=True, config={"displayModeBar":False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Chart D – Total Konsumsi kW
+        fig_totalkw = go.Figure()
+        fig_totalkw.add_trace(go.Scatter(
+            x=t, y=p_chiller5, name="Chiller 5",
+            mode="lines", stackgroup="one",
+            line=dict(color=ACCENT_BLUE, width=0),
+            fillcolor="rgba(59,130,246,0.5)"
+        ))
+        fig_totalkw.add_trace(go.Scatter(
+            x=t, y=p_chiller6, name="Chiller 6",
+            mode="lines", stackgroup="one",
+            line=dict(color=ACCENT_CYAN, width=0),
+            fillcolor="rgba(34,211,238,0.5)"
+        ))
+        fig_totalkw.add_trace(go.Scatter(
+            x=t, y=p_pred * (1 + load_factor * 0.3), name="Prediksi Total",
+            mode="lines", line=dict(color=ACCENT_AMBER, width=2, dash="dash")
+        ))
+        fig_totalkw.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=210,
+            xaxis={**_AX, "title":"Waktu"},
+            yaxis={**_AX, "title":"kW"})
+        st.markdown('<div class="chart-card"><div class="chart-title">Total Konsumsi Chiller (Stacked)</div><div class="chart-subtitle">Chiller 5 + Chiller 6 aktual vs prediksi total (kW)</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_totalkw, use_container_width=True, config={"displayModeBar":False})
+        st.markdown("</div>", unsafe_allow_html=True)
 
 # ─────────────────────────────── TAB 2 ───────────────────────────────────────
 with tab2:
@@ -447,33 +636,130 @@ with tab2:
             </div>""", unsafe_allow_html=True)
 
     st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
-    st.markdown('<div class="section-header">Matriks AHU vs Ruangan</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Lini Produksi – Supply Air Flow & Konsumsi AHU</div>', unsafe_allow_html=True)
 
-    ahu_groups = {}
+    # ── Supply Air Flow data per AHU (CMH) ──────────────────────────────────
+    ahu_airflow = {
+        "AHU-1": {"flow": 18500, "sp": sp_ahu1, "rooms": []},
+        "AHU-2": {"flow": 24200, "sp": sp_ahu2, "rooms": []},
+        "AHU-3": {"flow": 11800, "sp": sp_ahu3, "rooms": []},
+        "MAU":   {"flow": 15600, "sp": sp_mau,  "rooms": []},
+    }
     for room, info in rooms.items():
-        ahu_groups.setdefault(info["ahu"], []).append((room, info["kw"], info["load_pct"]))
+        ahu_airflow[info["ahu"]]["rooms"].append({
+            "name": room, "kw": info["kw"], "load_pct": info["load_pct"],
+            "temp": info["temp"], "rh": info["rh"]
+        })
 
-    ahu_names = list(ahu_groups.keys())
-    ahu_totals = [sum(x[1] for x in v) for v in ahu_groups.values()]
-    ahu_sp = [sp_ahu1, sp_ahu2, sp_ahu3, sp_mau]
+    # Sort AHU by air flow descending (highest supply first)
+    sorted_ahus = sorted(ahu_airflow.items(), key=lambda x: x[1]["flow"], reverse=True)
+    max_flow = sorted_ahus[0][1]["flow"]
 
-    fig_ahu = go.Figure()
-    for i, (ahu, grp) in enumerate(ahu_groups.items()):
-        for room, kw, lp in grp:
-            fig_ahu.add_trace(go.Bar(
-                name=room, x=[ahu], y=[kw],
-                marker_color=colors_donut[list(rooms.keys()).index(room)],
-                hovertemplate=f"<b>{room}</b><br>{kw} kW ({lp}% load)<extra></extra>"
-            ))
-    fig_ahu.update_layout(**PLOT_LAYOUT, margin=_M, height=260,
-        barmode="stack", yaxis_title="kW",
-        showlegend=True, legend=dict(
-            orientation="h", y=-0.2, x=0,
-            font=dict(size=10), bgcolor="rgba(0,0,0,0)"
+    col_lini, col_flow = st.columns([3, 2], gap="medium")
+
+    with col_lini:
+        # Horizontal grouped bar: Lini (rooms) grouped by AHU, sorted by airflow
+        fig_lini = go.Figure()
+        room_colors = {r: colors_donut[i] for i, r in enumerate(rooms.keys())}
+        for ahu_name, ahu_data in sorted_ahus:
+            for rm in ahu_data["rooms"]:
+                fig_lini.add_trace(go.Bar(
+                    name=rm["name"],
+                    y=[f"{ahu_name}  ({ahu_data['flow']:,} CMH)"],
+                    x=[rm["kw"]],
+                    orientation="h",
+                    marker_color=room_colors[rm["name"]],
+                    hovertemplate=(
+                        f"<b>{rm['name']}</b><br>"
+                        f"AHU: {ahu_name}<br>"
+                        f"Konsumsi: {rm['kw']} kW<br>"
+                        f"Load: {rm['load_pct']}%<br>"
+                        f"Suhu: {rm['temp']}°C | RH: {rm['rh']}%<extra></extra>"
+                    )
+                ))
+        fig_lini.update_layout(
+            **PLOT_LAYOUT,
+            margin=dict(l=0, r=0, t=10, b=40),
+            height=280,
+            barmode="stack",
+            xaxis={**_AX, "title":"Konsumsi (kW)"},
+            showlegend=True,
+            legend=dict(orientation="h", y=-0.18, x=0,
+                        font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+            yaxis=dict(gridcolor="#1e2d3d", zeroline=False,
+                       tickfont=dict(size=10), autorange="reversed"),
+        )
+        st.markdown('<div class="chart-card"><div class="chart-title">Konsumsi per Lini – Diurutkan Supply Air Flow Tertinggi</div><div class="chart-subtitle">AHU dengan flow terbesar di atas · klik legend untuk filter ruangan</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_lini, use_container_width=True, config={"displayModeBar":False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_flow:
+        # Supply Air Flow gauge bars per AHU
+        ahu_names_sorted  = [a for a, _ in sorted_ahus]
+        ahu_flows_sorted  = [d["flow"]  for _, d in sorted_ahus]
+        ahu_totalkw       = [sum(r["kw"] for r in d["rooms"]) for _, d in sorted_ahus]
+        flow_colors = [ACCENT_CYAN, ACCENT_BLUE, ACCENT_GREEN, ACCENT_PURPLE]
+
+        fig_flow = make_subplots(rows=1, cols=1)
+        fig_flow.add_trace(go.Bar(
+            name="Supply Air Flow",
+            x=ahu_names_sorted,
+            y=ahu_flows_sorted,
+            marker_color=flow_colors,
+            text=[f"{f:,} CMH" for f in ahu_flows_sorted],
+            textposition="outside",
+            textfont=dict(size=10, color="#8aa8c8"),
+            hovertemplate="<b>%{x}</b><br>Air Flow: %{y:,} CMH<extra></extra>"
         ))
-    st.markdown('<div class="chart-card"><div class="chart-title">Konsumsi per AHU (Stacked)</div><div class="chart-subtitle">Distribusi beban ruangan per unit AHU</div>', unsafe_allow_html=True)
-    st.plotly_chart(fig_ahu, use_container_width=True, config={"displayModeBar":False})
-    st.markdown("</div>", unsafe_allow_html=True)
+        # Overlay line for total kW
+        fig_flow.add_trace(go.Scatter(
+            name="Total kW",
+            x=ahu_names_sorted,
+            y=ahu_totalkw,
+            mode="lines+markers+text",
+            yaxis="y2",
+            line=dict(color=ACCENT_AMBER, width=2),
+            marker=dict(size=7, color=ACCENT_AMBER),
+            text=[f"{k} kW" for k in ahu_totalkw],
+            textposition="top center",
+            textfont=dict(size=10, color=ACCENT_AMBER),
+            hovertemplate="<b>%{x}</b><br>Total kW: %{y}<extra></extra>"
+        ))
+        fig_flow.update_layout(
+            **PLOT_LAYOUT,
+            margin=dict(l=0, r=40, t=30, b=10),
+            height=280,
+            xaxis={**_AX},
+            yaxis=dict(gridcolor="#1e2d3d", zeroline=False,
+                       tickfont=dict(size=10), title="Air Flow (CMH)"),
+            yaxis2=dict(overlaying="y", side="right", showgrid=False,
+                        tickfont=dict(size=10, color=ACCENT_AMBER),
+                        title=dict(text="kW", font=dict(color=ACCENT_AMBER))),
+            showlegend=True,
+            legend=dict(orientation="h", y=1.08, x=0,
+                        font=dict(size=10), bgcolor="rgba(0,0,0,0)"),
+            barmode="group",
+        )
+        st.markdown('<div class="chart-card"><div class="chart-title">Supply Air Flow per AHU</div><div class="chart-subtitle">Volume udara (CMH) vs total konsumsi (kW)</div>', unsafe_allow_html=True)
+        st.plotly_chart(fig_flow, use_container_width=True, config={"displayModeBar":False})
+        st.markdown("</div>", unsafe_allow_html=True)
+
+        # Summary table: AHU ranked by airflow
+        flow_df_data = {
+            "AHU":      ahu_names_sorted,
+            "Flow (CMH)":[f"{f:,}" for f in ahu_flows_sorted],
+            "kW Total": ahu_totalkw,
+            "SP (°C)":  [round(d["sp"],1) for _,d in sorted_ahus],
+            "Ruangan":  [len(d["rooms"]) for _,d in sorted_ahus],
+        }
+        st.dataframe(pd.DataFrame(flow_df_data), use_container_width=True, hide_index=True,
+            column_config={
+                "AHU":       st.column_config.TextColumn(width="small"),
+                "Flow (CMH)":st.column_config.TextColumn(width="medium"),
+                "kW Total":  st.column_config.NumberColumn(width="small"),
+                "SP (°C)":   st.column_config.NumberColumn(width="small"),
+                "Ruangan":   st.column_config.NumberColumn(width="small"),
+            })
 
 # ─────────────────────────────── TAB 3 ───────────────────────────────────────
 with tab3:
@@ -498,7 +784,7 @@ with tab3:
         fig_sens.add_vline(x=outside_temp, line_color=ACCENT_AMBER, line_dash="dash",
             annotation_text=f"  Saat ini: {outside_temp}°C", annotation_font_color=ACCENT_AMBER)
         fig_sens.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=240,
-            xaxis_title="Suhu Luar (°C)", yaxis_title="Prediksi Konsumsi (kW)")
+            xaxis={**_AX}, yaxis={**_AX})
         st.markdown('<div class="chart-card"><div class="chart-title">Sensitivitas: Suhu Luar vs Konsumsi Chiller</div><div class="chart-subtitle">Dampak perubahan suhu ambient terhadap prediksi kW</div>', unsafe_allow_html=True)
         st.plotly_chart(fig_sens, use_container_width=True, config={"displayModeBar":False})
         st.markdown("</div>", unsafe_allow_html=True)
@@ -513,7 +799,7 @@ with tab3:
             hovertemplate="Setpoint: %{x}<br>Saving: %{y:.1f} kW<extra></extra>"
         ))
         fig_sp.update_layout(**PLOT_LAYOUT, margin=_M, legend=_L, height=200,
-            xaxis_title="Setpoint AHU (°C)", yaxis_title="Saving / Tambahan (kW)")
+            xaxis={**_AX}, yaxis={**_AX})
         st.markdown('<div class="chart-card"><div class="chart-title">Potensi Penghematan: Setpoint AHU</div><div class="chart-subtitle">Perubahan setpoint AHU vs estimasi penghematan energi</div>', unsafe_allow_html=True)
         st.plotly_chart(fig_sp, use_container_width=True, config={"displayModeBar":False})
         st.markdown("</div>", unsafe_allow_html=True)
